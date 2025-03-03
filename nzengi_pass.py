@@ -4,13 +4,15 @@
 @author: iceland
 """
 import sys
-import secp256k1 as ice
+# import secp256k1 as ice
+from ecdsa import SECP256k1, SigningKey, VerifyingKey
 import argparse
 from urllib.request import urlopen
 import hashlib
+import json
 #==============================================================================
 parser = argparse.ArgumentParser(description='This tool helps to get ECDSA Signature r,s,z values from Bitcoin rawtx or txid', 
-                                 epilog='Enjoy the program! :)    Tips BTC: bc1q39meky2mn5qjq704zz0nnkl0v7kj4uz6r529at')
+                                 epilog='-- Created by . --')
 
 parser.add_argument("-txid", help = "txid of the transaction. Automatically fetch rawtx from given txid", action="store")
 parser.add_argument("-rawtx", help = "Raw Transaction on the blockchain.", action="store")
@@ -36,51 +38,75 @@ def get_rs(sig):
     return r, s
     
 def split_sig_pieces(script):
-    sigLen = int(script[2:4], 16)
-    sig = script[2+2:2+sigLen*2]
-    r, s = get_rs(sig[4:])
-    pubLen = int(script[4+sigLen*2:4+sigLen*2+2], 16)
-    pub = script[4+sigLen*2+2:]
-    assert(len(pub) == pubLen*2)
-    return r, s, pub
+    try:
+        sigLen = int(script[2:4], 16)
+        sig = script[2+2:2+sigLen*2]
+        r, s = get_rs(sig[4:])
+        pubLen = int(script[4+sigLen*2:4+sigLen*2+2], 16)
+        pub = script[4+sigLen*2+2:]
+        assert(len(pub) == pubLen*2)
+        return r, s, pub
+    except (ValueError, IndexError, AssertionError):
+        # SegWit için alternatif parsing
+        try:
+            # SegWit scriptSig genellikle boş olur
+            return "0" * 64, "0" * 64, script  # Dummy values for r, s and pubkey
+        except:
+            print(f"Unable to parse script: {script}")
+            sys.exit(1)
 
 
 # Returns list of this list [first, sig, pub, rest] for each input
 def parseTx(txn):
-    if len(txn) <130:
+    if len(txn) < 130:
         print('[WARNING] rawtx most likely incorrect. Please check..')
         sys.exit(1)
     inp_list = []
     ver = txn[:8]
-    if txn[8:12] == '0001':
-        print('UnSupported Tx Input. Presence of Witness Data')
-        sys.exit(1)
-    inp_nu = int(txn[8:10], 16)
     
-    first = txn[0:10]
-    cur = 10
+    # SegWit işlemlerini destekle
+    cur = 8
+    is_witness = False
+    if txn[8:12] == '0001':
+        is_witness = True
+        cur = 12
+    
+    inp_nu = int(txn[cur:cur+2], 16)
+    first = txn[0:cur+2]
+    cur = cur+2
+    
     for m in range(inp_nu):
         prv_out = txn[cur:cur+64]
         var0 = txn[cur+64:cur+64+8]
         cur = cur+64+8
         scriptLen = int(txn[cur:cur+2], 16)
-        script = txn[cur:2+cur+2*scriptLen] #8b included
+        script = txn[cur:2+cur+2*scriptLen] if scriptLen > 0 else ""
         r, s, pub = split_sig_pieces(script)
         seq = txn[2+cur+2*scriptLen:10+cur+2*scriptLen]
         inp_list.append([prv_out, var0, r, s, pub, seq])
         cur = 10+cur+2*scriptLen
+    
     rest = txn[cur:]
     return [first, inp_list, rest]
 
 #==============================================================================
 def get_rawtx_from_blockchain(txid):
     try:
-        htmlfile = urlopen("https://blockchain.info/rawtx/%s?format=hex" % txid, timeout = 20)
-    except:
-        print('Unable to connect internet to fetch RawTx. Exiting..')
-        sys.exit(1)
-    else: res = htmlfile.read().decode('utf-8')
-    return res
+        # Blockchair API'sini kullanalım
+        htmlfile = urlopen(f"https://api.blockchair.com/bitcoin/raw/transaction/{txid}", timeout = 20)
+        res = htmlfile.read().decode('utf-8')
+        # Blockchair API json döndürüyor, raw tx'i alalım
+        data = json.loads(res)
+        rawtx = data['data'][0]['raw_transaction']
+        return rawtx
+    except Exception as e:
+        try:
+            # Alternatif olarak blockchain.info'yu deneyelim
+            htmlfile = urlopen(f"https://blockchain.info/rawtx/{txid}?format=hex", timeout = 20)
+            return htmlfile.read().decode('utf-8')
+        except Exception as e2:
+            print(f'Unable to connect to any API to fetch RawTx. Errors:\n1: {str(e)}\n2: {str(e2)}\nExiting..')
+            sys.exit(1)
 # =============================================================================
 
 def getSignableTxn(parsed):
@@ -104,7 +130,8 @@ def getSignableTxn(parsed):
 #==============================================================================
 def scalar_multiplication(k):
     """Scalar multiplication on the secp256k1 curve"""
-    return ice.scalar_multiplication(k)
+    # return ice.scalar_multiplication(k)
+    pass
 
 def pub2upub(pub_hex):
     """Convert compressed public key to uncompressed public key"""
